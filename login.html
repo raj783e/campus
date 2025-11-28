@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Campus Connect</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="login.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <div class="login-container">
+        <div class="glass-panel login-card">
+            <div class="login-logo">
+                <i class="fas fa-graduation-cap"></i> Campus Connect
+            </div>
+            <p id="formTitle">Welcome back! Please login to your account.</p>
+
+            <form id="authForm">
+                <div class="form-group">
+                    <label for="email">Email Address</label>
+                    <input type="email" id="email" class="form-control" placeholder="student@university.edu" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" class="form-control" placeholder="••••••••" required>
+                </div>
+
+                <button type="submit" id="submitBtn" class="btn btn-primary" style="width: 100%; margin-bottom: 1rem;">
+                    Sign In
+                </button>
+
+                <button type="button" id="googleLoginBtn" class="btn btn-outline" style="width: 100%;">
+                    <i class="fab fa-google"></i> Continue with Google
+                </button>
+            </form>
+
+            <div style="margin-top: 1.5rem; font-size: 0.9rem; text-align: center;">
+                <span id="toggleText">Don't have an account? </span>
+                <a href="#" id="toggleAuthMode" style="color: var(--primary-color); font-weight: 600;">Sign Up</a>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { auth, googleProvider, signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword } from './firebase_config.js';
+
+        const googleLoginBtn = document.getElementById('googleLoginBtn');
+        const authForm = document.getElementById('authForm');
+        const toggleAuthModeBtn = document.getElementById('toggleAuthMode');
+        const formTitle = document.getElementById('formTitle');
+        const submitBtn = document.getElementById('submitBtn');
+        const toggleText = document.getElementById('toggleText');
+
+        let isLoginMode = true;
+
+        // Toggle between Login and Sign Up
+        toggleAuthModeBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            isLoginMode = !isLoginMode;
+
+            if (isLoginMode) {
+                formTitle.textContent = "Welcome back! Please login to your account.";
+                submitBtn.textContent = "Sign In";
+                toggleText.textContent = "Don't have an account? ";
+                toggleAuthModeBtn.textContent = "Sign Up";
+            } else {
+                formTitle.textContent = "Create an account to join Campus Connect.";
+                submitBtn.textContent = "Sign Up";
+                toggleText.textContent = "Already have an account? ";
+                toggleAuthModeBtn.textContent = "Login";
+            }
+        });
+
+        // Google Login
+        googleLoginBtn.addEventListener('click', async () => {
+            try {
+                const result = await signInWithPopup(auth, googleProvider);
+                window.location.href = 'index.html';
+            } catch (error) {
+                console.error("Error during Google sign-in: ", error);
+                alert("Login failed: " + error.message);
+            }
+        });
+
+        // Email/Password Auth
+        authForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                if (isLoginMode) {
+                    await signInWithEmailAndPassword(auth, email, password);
+                } else {
+                    await createUserWithEmailAndPassword(auth, email, password);
+                }
+                window.location.href = 'index.html';
+            } catch (error) {
+                console.error("Authentication error: ", error);
+                alert((isLoginMode ? "Login" : "Sign Up") + " failed: " + error.message);
+            }
+        });
+    </script>
+</body>
+
+</html>
