@@ -1,4 +1,4 @@
-import { auth, db, signOut, onAuthStateChanged, doc, getDoc, setDoc, collection, addDoc, query, orderBy, onSnapshot, updateDoc, arrayUnion, where } from './firebase_config.js';
+import { auth, db, signOut, onAuthStateChanged, doc, getDoc, setDoc, collection, addDoc, query, orderBy, onSnapshot, updateDoc, arrayUnion, where, getDocs, storage, ref, uploadBytes, getDownloadURL, deleteDoc } from './firebase_config.js';
 
 // Current User Data (Mock)
 let currentUser = null;
@@ -45,6 +45,35 @@ function setupRealtimeListeners() {
         materials = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         refreshCurrentView();
     });
+
+    // Global Message Notifications
+    const qChats = query(collection(db, "chats"), where("participants", "array-contains", currentUser.uid));
+    onSnapshot(qChats, (snapshot) => {
+        let hasUnread = false;
+        snapshot.docChanges().forEach((change) => {
+            if (change.type === "modified" || change.type === "added") {
+                const data = change.doc.data();
+                // If the last message was NOT sent by me, and it's recent (logic simplified for now)
+                // In a real app, we'd check a 'read' timestamp.
+                // Here, we just check if it's not me.
+                if (data.lastSenderId && data.lastSenderId !== currentUser.uid) {
+                    // Check if we are currently viewing this chat
+                    if (activeChatId !== change.doc.id) {
+                        hasUnread = true;
+                        showToast(`New message from ${data.participantNames.find(n => n !== currentUser.name)}`, "info");
+                    }
+                }
+            }
+        });
+
+        const dot = document.getElementById('msgNotificationDot');
+        if (dot) {
+            if (hasUnread) {
+                dot.classList.add('active');
+            }
+            // Note: We don't auto-remove it here, we remove it when they click 'Messages'
+        }
+    });
 }
 
 function refreshCurrentView() {
@@ -75,12 +104,12 @@ const editProfileForm = document.getElementById('editProfileForm');
 const profilePhotoInput = document.getElementById('profilePhotoInput');
 const profilePreview = document.getElementById('profilePreview');
 
-// Chat Elements
-const chatBox = document.getElementById('chatBox');
-const chatContactName = document.getElementById('chatContactName');
-const chatMessages = document.getElementById('chatMessages');
-const chatInput = document.getElementById('chatInput');
-const sendMessageBtn = document.getElementById('sendMessageBtn');
+// Chat Elements (Legacy - Removed)
+// const chatBox = document.getElementById('chatBox');
+// const chatContactName = document.getElementById('chatContactName');
+// const chatMessages = document.getElementById('chatMessages');
+// const chatInput = document.getElementById('chatInput');
+// const sendMessageBtn = document.getElementById('sendMessageBtn');
 const completeProfileModal = document.getElementById('completeProfileModal');
 const completeProfileForm = document.getElementById('completeProfileForm');
 const inquiriesModal = document.getElementById('inquiriesModal');
@@ -88,6 +117,7 @@ const inquiriesList = document.getElementById('inquiriesList');
 
 let activeChatId = null;
 let chatUnsubscribe = null;
+let conversationUnsubscribe = null;
 
 // Auth State Listener
 onAuthStateChanged(auth, async (user) => {
@@ -195,6 +225,10 @@ logoutBtn.addEventListener('click', async (e) => {
 // Modal Logic
 newPostBtn.addEventListener('click', () => {
     modal.style.display = 'flex';
+    if (postTypeSelect) {
+        postTypeSelect.value = 'notice'; // Reset to default
+        postTypeSelect.dispatchEvent(new Event('change'));
+    }
 });
 
 window.addEventListener('click', (e) => {
@@ -216,6 +250,7 @@ const locationGroup = document.getElementById('locationGroup');
 const titleLabel = document.getElementById('titleLabel');
 const locationLabel = document.getElementById('locationLabel');
 const descLabel = document.getElementById('descLabel');
+const subjectGroup = document.getElementById('subjectGroup');
 
 if (postTypeSelect) {
     postTypeSelect.addEventListener('change', () => {
@@ -227,6 +262,7 @@ if (postTypeSelect) {
         dateGroup.style.display = 'none';
         locationGroup.style.display = 'none';
         fileUploadGroup.style.display = 'none';
+        subjectGroup.style.display = 'none';
 
         // Default Labels
         titleLabel.textContent = 'Title';
@@ -243,6 +279,7 @@ if (postTypeSelect) {
             titleLabel.textContent = 'Item Name';
             lostFoundTypeGroup.style.display = 'block';
             locationGroup.style.display = 'block';
+            dateGroup.style.display = 'block';
             locationLabel.textContent = 'Location Name';
             descLabel.textContent = 'Details';
             fileUploadGroup.style.display = 'block';
@@ -252,6 +289,7 @@ if (postTypeSelect) {
             titleLabel.textContent = 'Title Name';
             descLabel.textContent = 'Action / Description';
             fileUploadGroup.style.display = 'block';
+            subjectGroup.style.display = 'block';
             fileLabel.textContent = 'Upload Document';
             postFileInput.accept = '.pdf,.doc,.docx,.txt';
         }
@@ -260,6 +298,11 @@ if (postTypeSelect) {
 
 createForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+
+    if (!currentUser) {
+        showToast("You must be logged in to post.", "error");
+        return;
+    }
 
     const type = document.getElementById('postType').value;
     const title = document.getElementById('postTitle').value;
@@ -270,8 +313,17 @@ createForm.addEventListener('submit', async (e) => {
     const eventDate = document.getElementById('postDate').value;
     const location = document.getElementById('postLocation').value;
     const lostType = document.getElementById('lostFoundType').value;
+    const subject = document.getElementById('postSubject').value;
 
     const date = new Date().toISOString().split('T')[0];
+
+    // File Validation
+    if (file && file.size > 5 * 1024 * 1024) { // 5MB limit
+        showToast("File is too large. Max size is 5MB.", "error");
+        return;
+    }
+
+    console.log(`Creating post of type: ${type}`);
 
     try {
         if (type === 'notice') {
@@ -297,7 +349,27 @@ createForm.addEventListener('submit', async (e) => {
             });
         } else if (type === 'lost-found') {
             let imageUrl = null;
-            if (file) imageUrl = URL.createObjectURL(file); // Ideally upload to Storage
+            if (file) {
+                showToast("Uploading image...", "info");
+                try {
+                    // Import uploadBytesResumable dynamically if needed, or assume it's available from the module
+                    // Since we didn't import it, let's stick to uploadBytes but with better error logging
+                    // Wait, I should add uploadBytesResumable to imports first if I want to use it.
+                    // For now, I'll stick to uploadBytes but ensure the path is clean.
+
+                    const cleanFileName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
+                    const storageRef = ref(storage, `lost_found/${currentUser.uid}/${Date.now()}_${cleanFileName}`);
+
+                    console.log("Starting upload to:", storageRef.fullPath);
+                    const snapshot = await uploadBytes(storageRef, file);
+                    console.log("Upload successful:", snapshot);
+                    imageUrl = await getDownloadURL(storageRef);
+                } catch (uploadError) {
+                    console.error("Image upload failed:", uploadError);
+                    showToast("Image upload failed: " + uploadError.message, "error");
+                    return;
+                }
+            }
 
             await addDoc(collection(db, "lostFound"), {
                 type: lostType, // Lost or Found
@@ -311,10 +383,25 @@ createForm.addEventListener('submit', async (e) => {
             });
         } else if (type === 'material') {
             let fileUrl = "";
-            if (file) fileUrl = URL.createObjectURL(file); // Ideally upload to Storage
+            if (file) {
+                showToast("Uploading file...", "info");
+                try {
+                    const cleanFileName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
+                    const storageRef = ref(storage, `materials/${currentUser.uid}/${Date.now()}_${cleanFileName}`);
+
+                    console.log("Starting upload to:", storageRef.fullPath);
+                    const snapshot = await uploadBytes(storageRef, file);
+                    console.log("Upload successful:", snapshot);
+                    fileUrl = await getDownloadURL(storageRef);
+                } catch (uploadError) {
+                    console.error("File upload failed:", uploadError);
+                    showToast("File upload failed: " + uploadError.message, "error");
+                    return;
+                }
+            }
 
             await addDoc(collection(db, "materials"), {
-                subject: "General",
+                subject: subject || "General",
                 title, // Title Name
                 author: currentUser.name, // Author Name (Profile Name)
                 authorId: currentUser.uid,
@@ -330,7 +417,7 @@ createForm.addEventListener('submit', async (e) => {
         fileUploadGroup.style.display = 'none';
     } catch (error) {
         console.error("Error creating post:", error);
-        showToast("Error creating post", "error");
+        showToast("Error creating post: " + error.message, "error");
     }
 });
 
@@ -415,7 +502,9 @@ editProfileForm.addEventListener('submit', async (e) => {
 
     let photoUrl = currentUser.photo;
     if (file) {
-        photoUrl = URL.createObjectURL(file);
+        const storageRef = ref(storage, `profile_photos/${currentUser.uid}/${file.name}`);
+        await uploadBytes(storageRef, file);
+        photoUrl = await getDownloadURL(storageRef);
     }
 
     const updatedData = {
@@ -447,13 +536,19 @@ editProfileForm.addEventListener('submit', async (e) => {
 });
 
 function updateHeaderProfile() {
-    const headerProfile = document.querySelector('.user-profile');
-    const avatarContent = currentUser.photo ?
-        `<img src="${currentUser.photo}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">` :
-        getInitials(currentUser.name);
+    const sidebarAvatar = document.getElementById('sidebarAvatar');
+    const sidebarName = document.getElementById('sidebarName');
+    const sidebarId = document.getElementById('sidebarId');
 
-    headerProfile.querySelector('.avatar').innerHTML = avatarContent;
-    headerProfile.querySelector('span').textContent = currentUser.name;
+    if (sidebarAvatar && sidebarName) {
+        const avatarContent = currentUser.photo ?
+            `<img src="${currentUser.photo}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">` :
+            getInitials(currentUser.name);
+
+        sidebarAvatar.innerHTML = avatarContent;
+        sidebarName.textContent = currentUser.name;
+        if (sidebarId) sidebarId.textContent = `ID: ${currentUser.id || 'N/A'}`;
+    }
 }
 
 function getInitials(name) {
@@ -461,92 +556,67 @@ function getInitials(name) {
 }
 
 // Chat Logic
-sendMessageBtn.addEventListener('click', sendChatMessage);
-chatInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') sendChatMessage();
-});
+// Chat Logic (Legacy - Removed)
+// sendMessageBtn.addEventListener('click', sendChatMessage);
+// chatInput.addEventListener('keypress', (e) => {
+//     if (e.key === 'Enter') sendChatMessage();
+// });
 
-async function sendChatMessage() {
-    const text = chatInput.value.trim();
-    if (!text || !activeChatId) return;
+// Legacy sendChatMessage (Removed)
+
+// Open Chat (Redirects to Messages View)
+window.openChat = async (ownerName, ownerId, itemId) => {
+    if (!currentUser) {
+        showToast("You must be logged in to chat.", "error");
+        return;
+    }
 
     try {
-        await addDoc(collection(db, "chats", activeChatId, "messages"), {
-            text: text,
-            senderId: currentUser.uid,
-            senderName: currentUser.name,
-            timestamp: new Date().toISOString()
+        // Check if chat already exists
+        const q = query(
+            collection(db, "chats"),
+            where("itemId", "==", itemId),
+            where("participants", "array-contains", currentUser.uid)
+        );
+
+        const snapshot = await getDocs(q);
+        let chatDocId = null;
+
+        snapshot.docs.forEach(doc => {
+            const data = doc.data();
+            if (data.participants.includes(ownerId)) {
+                chatDocId = doc.id;
+            }
         });
-        chatInput.value = '';
-    } catch (error) {
-        console.error("Error sending message:", error);
-        showToast("Error sending message", "error");
-    }
-}
 
-// Open Chat (Finder contacting Owner)
-window.openChat = async (ownerName, ownerId, itemId) => {
-    // Check if chat already exists
-    const q = query(
-        collection(db, "chats"),
-        where("itemId", "==", itemId),
-        where("participants", "array-contains", currentUser.uid)
-    );
-
-    const snapshot = await getDocs(q);
-    let chatDocId = null;
-
-    // Filter for specific pair (since array-contains only checks for one)
-    snapshot.docs.forEach(doc => {
-        const data = doc.data();
-        if (data.participants.includes(ownerId)) {
-            chatDocId = doc.id;
+        if (!chatDocId) {
+            // Create new chat
+            const newChat = await addDoc(collection(db, "chats"), {
+                itemId: itemId,
+                participants: [currentUser.uid, ownerId],
+                participantNames: [currentUser.name, ownerName],
+                startedAt: new Date().toISOString()
+            });
+            chatDocId = newChat.id;
         }
-    });
 
-    if (!chatDocId) {
-        // Create new chat
-        const newChat = await addDoc(collection(db, "chats"), {
-            itemId: itemId,
-            participants: [currentUser.uid, ownerId],
-            participantNames: [currentUser.name, ownerName],
-            startedAt: new Date().toISOString()
-        });
-        chatDocId = newChat.id;
+        activeChatId = chatDocId;
+
+        // Switch to Messages View
+        document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+        document.querySelector('[data-view="messages"]').classList.add('active');
+        renderView('messages');
+
+    } catch (error) {
+        console.error("Error in openChat:", error);
+        showToast("Error opening chat: " + error.message, "error");
     }
-
-    loadChat(chatDocId, ownerName);
 };
 
 // Load Chat Interface
-function loadChat(chatId, title) {
-    activeChatId = chatId;
-    chatContactName.textContent = title;
-    chatMessages.innerHTML = '';
-    chatBox.style.display = 'flex';
-
-    // Unsubscribe previous listener
-    if (chatUnsubscribe) chatUnsubscribe();
-
-    // Listen for messages
-    const q = query(collection(db, "chats", chatId, "messages"), orderBy("timestamp", "asc"));
-    chatUnsubscribe = onSnapshot(q, (snapshot) => {
-        chatMessages.innerHTML = '';
-        snapshot.docs.forEach(doc => {
-            const msg = doc.data();
-            const type = msg.senderId === currentUser.uid ? 'sent' : 'received';
-            addMessageToChat(msg.text, type);
-        });
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    });
-}
-
-function addMessageToChat(text, type) {
-    const msgDiv = document.createElement('div');
-    msgDiv.className = `chat-msg ${type}`;
-    msgDiv.textContent = text;
-    chatMessages.appendChild(msgDiv);
-}
+// Legacy Chat Functions (Removed)
+// function loadChat(chatId, title) { ... }
+// function addMessageToChat(text, type) { ... }
 
 // View Inquiries (Owner viewing chats)
 window.viewInquiries = async (itemId) => {
@@ -572,7 +642,11 @@ window.viewInquiries = async (itemId) => {
             btn.innerHTML = `<i class="fas fa-user"></i> Chat with ${otherName}`;
             btn.onclick = () => {
                 inquiriesModal.style.display = 'none';
-                loadChat(doc.id, `Chat with ${otherName}`);
+                activeChatId = doc.id;
+                // Switch to Messages View
+                document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+                document.querySelector('[data-view="messages"]').classList.add('active');
+                renderView('messages');
             };
             inquiriesList.appendChild(btn);
         });
@@ -590,6 +664,7 @@ function renderView(view) {
         'events': 'Events',
         'lost-found': 'Lost & Found',
         'study-materials': 'Study Materials',
+        'messages': 'Messages',
         'profile': 'My Profile'
     };
     pageTitle.textContent = titles[view] || 'Dashboard';
@@ -601,10 +676,183 @@ function renderView(view) {
         case 'events': renderEvents(); break;
         case 'lost-found': renderLostFound(); break;
         case 'study-materials': renderMaterials(); break;
-        case 'profile': renderProfile(); break;
+        case 'messages': renderChatView(); break;
+        case 'profile': renderEditProfile(); break;
         default: renderDashboard();
     }
 }
+
+// Wishlist Logic
+window.toggleWishlist = async (btn, itemId) => {
+    btn.classList.toggle('active');
+    const icon = btn.querySelector('i');
+    if (btn.classList.contains('active')) {
+        icon.classList.remove('far');
+        icon.classList.add('fas');
+        showToast("Added to wishlist", "success");
+        // TODO: Save to Firestore
+    } else {
+        icon.classList.remove('fas');
+        icon.classList.add('far');
+        showToast("Removed from wishlist", "info");
+        // TODO: Remove from Firestore
+    }
+};
+
+// Full Page Chat View
+async function renderChatView() {
+    // Clear notification
+    const dot = document.getElementById('msgNotificationDot');
+    if (dot) dot.classList.remove('active');
+
+    pageTitle.textContent = 'Messages';
+    contentArea.innerHTML = `
+        <div class="chat-container">
+            <div class="chat-sidebar" id="chatSidebar">
+                <h3 style="margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.1);">Conversations</h3>
+                <div id="conversationList">
+                    <!-- Conversations loaded here -->
+                    <p style="text-align:center; color:var(--text-muted); margin-top:2rem;">Loading...</p>
+                </div>
+            </div>
+            <div class="chat-main" id="chatMain">
+                ${activeChatId ? `
+                    <div class="chat-main-header" id="chatHeaderName">Loading...</div>
+                    <div class="chat-main-messages" id="fullChatMessages"></div>
+                    <div class="chat-main-input">
+                        <input type="text" id="fullChatInput" class="form-control" placeholder="Type a message...">
+                        <button id="fullChatSendBtn" class="btn btn-primary"><i class="fas fa-paper-plane"></i></button>
+                    </div>
+                ` : `
+                    <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; color:var(--text-muted);">
+                        <i class="fas fa-comments" style="font-size: 3rem; margin-bottom: 1rem;"></i>
+                        <p>Select a conversation to start chatting</p>
+                    </div>
+                `}
+            </div>
+        </div>
+    `;
+
+    if (activeChatId) {
+        setupFullChatListeners();
+    }
+
+    // Load Conversations (Real-time)
+    // Note: We sort client-side to avoid needing a composite index in Firestore for this prototype
+    const q = query(
+        collection(db, "chats"),
+        where("participants", "array-contains", currentUser.uid)
+    );
+
+    const listContainer = document.getElementById('conversationList');
+
+    if (conversationUnsubscribe) conversationUnsubscribe();
+
+    conversationUnsubscribe = onSnapshot(q, (snapshot) => {
+        listContainer.innerHTML = '';
+        if (snapshot.empty) {
+            listContainer.innerHTML = '<p style="text-align:center; color:var(--text-muted); margin-top:1rem;">No conversations yet.</p>';
+        } else {
+            // Client-side sort by startedAt (descending)
+            const chats = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            chats.sort((a, b) => {
+                const dateA = a.startedAt ? new Date(a.startedAt) : new Date(0);
+                const dateB = b.startedAt ? new Date(b.startedAt) : new Date(0);
+                return dateB - dateA;
+            });
+
+            chats.forEach(data => {
+                let otherName = data.participantNames.find(name => name !== currentUser.name);
+                if (!otherName) otherName = "Me (Self)";
+
+                const div = document.createElement('div');
+                div.className = `conversation-item ${data.id === activeChatId ? 'active' : ''}`;
+                div.innerHTML = `
+                    <div class="conversation-name">${otherName}</div>
+                    <div class="conversation-preview">Click to view chat</div>
+                `;
+                div.onclick = () => {
+                    activeChatId = data.id;
+                    renderChatView(); // Re-render to show selected chat
+                };
+                listContainer.appendChild(div);
+            });
+        }
+    }, (error) => {
+        console.error("Error loading chats:", error);
+        listContainer.innerHTML = '<p style="text-align:center; color:red; margin-top:1rem;">Error loading chats.</p>';
+    });
+}
+
+function setupFullChatListeners() {
+    const input = document.getElementById('fullChatInput');
+    const sendBtn = document.getElementById('fullChatSendBtn');
+    const messagesDiv = document.getElementById('fullChatMessages');
+    const headerName = document.getElementById('chatHeaderName');
+
+    // Get Chat Details for Header
+    getDoc(doc(db, "chats", activeChatId)).then(docSnap => {
+        if (docSnap.exists()) {
+            const data = docSnap.data();
+            const otherName = data.participantNames.find(name => name !== currentUser.name) || "Chat";
+            headerName.textContent = otherName;
+        }
+    });
+
+    // Send Message Logic
+    const sendMessage = async () => {
+        const text = input.value.trim();
+        if (!text) return;
+
+        try {
+            const timestamp = new Date().toISOString();
+
+            // 1. Add message to subcollection
+            await addDoc(collection(db, "chats", activeChatId, "messages"), {
+                text: text,
+                senderId: currentUser.uid,
+                senderName: currentUser.name,
+                timestamp: timestamp
+            });
+
+            // 2. Update parent chat document (for sorting and notifications)
+            await updateDoc(doc(db, "chats", activeChatId), {
+                lastMessage: text,
+                lastMessageTime: timestamp,
+                lastSenderId: currentUser.uid,
+                startedAt: timestamp // Update startedAt so it bubbles to top
+            });
+
+            input.value = '';
+        } catch (error) {
+            console.error("Error sending message:", error);
+            showToast("Error sending message", "error");
+        }
+    };
+
+    sendBtn.addEventListener('click', sendMessage);
+    input.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') sendMessage();
+    });
+
+    // Real-time Messages
+    const q = query(collection(db, "chats", activeChatId, "messages"), orderBy("timestamp", "asc"));
+    onSnapshot(q, (snapshot) => {
+        messagesDiv.innerHTML = '';
+        snapshot.docs.forEach(doc => {
+            const msg = doc.data();
+            const type = msg.senderId === currentUser.uid ? 'sent' : 'received';
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `chat-msg ${type}`; // Reuse existing chat-msg styles
+            msgDiv.textContent = msg.text;
+            messagesDiv.appendChild(msgDiv);
+        });
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    });
+}
+
+
 
 function renderProfile() {
     // Filter data for current user
@@ -761,6 +1009,51 @@ window.toggleExpand = (btn, contentId) => {
     }
 };
 
+// Wishlist Logic
+window.toggleWishlist = async (btn, itemId) => {
+    if (!currentUser) {
+        showToast("Please log in to use wishlist", "error");
+        return;
+    }
+
+    btn.classList.toggle('active');
+    const icon = btn.querySelector('i');
+    const isAdding = btn.classList.contains('active');
+
+    if (isAdding) {
+        icon.classList.remove('far');
+        icon.classList.add('fas');
+        try {
+            await setDoc(doc(db, "users", currentUser.uid, "wishlist", itemId), {
+                itemId: itemId,
+                addedAt: new Date().toISOString()
+            });
+            showToast("Added to wishlist", "success");
+        } catch (error) {
+            console.error("Error adding to wishlist:", error);
+            showToast("Error adding to wishlist", "error");
+            // Revert UI
+            btn.classList.remove('active');
+            icon.classList.remove('fas');
+            icon.classList.add('far');
+        }
+    } else {
+        icon.classList.remove('fas');
+        icon.classList.add('far');
+        try {
+            await deleteDoc(doc(db, "users", currentUser.uid, "wishlist", itemId));
+            showToast("Removed from wishlist", "info");
+        } catch (error) {
+            console.error("Error removing from wishlist:", error);
+            showToast("Error removing from wishlist", "error");
+            // Revert UI
+            btn.classList.add('active');
+            icon.classList.remove('far');
+            icon.classList.add('fas');
+        }
+    }
+};
+
 function renderNotices() {
     contentArea.innerHTML = `
         <div class="glass-panel" style="padding: 1.5rem;">
@@ -778,7 +1071,7 @@ function renderNotices() {
 
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         <small style="color:var(--primary-color);">Posted by: ${notice.author}</small>
-                        <button class="btn btn-sm btn-outline" onclick="toggleComments(${notice.id})">
+                        <button class="btn btn-sm btn-outline" onclick="toggleComments('${notice.id}')">
                             <i class="fas fa-comment"></i> Comments
                         </button>
                     </div>
@@ -794,7 +1087,7 @@ function renderNotices() {
                         </div>
                         <div class="comment-input-group">
                             <input type="text" id="comment-input-${notice.id}" class="form-control" placeholder="Write a comment...">
-                            <button class="btn btn-primary" onclick="postComment(${notice.id})">Post</button>
+                            <button class="btn btn-primary" onclick="postComment('${notice.id}')">Post</button>
                         </div>
                     </div>
                 </div>
@@ -825,57 +1118,137 @@ function renderSchedule() {
     `;
 }
 
-function renderEvents() {
-    contentArea.innerHTML = `
-        <div class="dashboard-grid">
-            ${events.map(e => {
-        const isRegistered = e.registeredUsers && e.registeredUsers.includes(currentUser.uid);
-        return `
-                <div class="glass-panel card">
-                    <h3 class="card-title">${e.title}</h3>
-                    <p style="color:var(--secondary-color); font-weight:600; margin-bottom:0.5rem;">
-                        <i class="fas fa-calendar"></i> ${e.date}
-                    </p>
-                    <p style="margin-bottom:0.5rem;"><i class="fas fa-map-marker-alt"></i> ${e.location}</p>
-                    
-                    <div id="event-desc-${e.id}" style="max-height: 3rem; overflow: hidden; margin-bottom: 0.5rem;">
-                        <p>${e.description}</p>
-                    </div>
-                    <button class="btn btn-sm btn-outline" style="margin-bottom: 1rem; align-self: flex-start;" onclick="toggleExpand(this, 'event-desc-${e.id}')">Read More</button>
+// Helper to escape strings for inline onclick handlers
+// Helper to escape strings for inline onclick handlers
+window.safeParam = (str) => {
+    if (!str) return '';
+    return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+};
 
-                    ${isRegistered ?
-                `<button class="btn btn-primary" style="width:100%; margin-top:auto; background: #22c55e; cursor: default;">Registered <i class="fas fa-check"></i></button>` :
-                `<button class="btn btn-outline" style="width:100%; margin-top:auto;" onclick="openRegisterModal('${e.title}', '${e.id}')">Register</button>`
-            }
+function renderEvents() {
+    console.log("Rendering Events...", events);
+    if (!currentUser) {
+        contentArea.innerHTML = '<p class="text-center">Please log in to view Events.</p>';
+        return;
+    }
+
+    try {
+        if (!events) {
+            contentArea.innerHTML = '<p class="text-center">Loading events...</p>';
+            return;
+        }
+
+        if (events.length === 0) {
+            contentArea.innerHTML = `
+                <div class="glass-panel" style="padding: 3rem; text-align: center;">
+                    <i class="fas fa-calendar-times" style="font-size: 3rem; color: var(--text-muted); margin-bottom: 1rem;"></i>
+                    <p style="color: var(--text-muted);">No upcoming events found.</p>
+                    <button class="btn btn-primary" onclick="document.getElementById('newPostBtn').click()">Create Event</button>
                 </div>
-            `}).join('')}
-        </div>
-    `;
+            `;
+            return;
+        }
+
+        contentArea.innerHTML = `
+            <div class="dashboard-grid">
+                ${events.map(e => {
+            try {
+                const isRegistered = e.registeredUsers && Array.isArray(e.registeredUsers) && e.registeredUsers.includes(currentUser.uid);
+                return `
+                        <div class="glass-panel card">
+                            <h3 class="card-title">${e.title || 'Untitled Event'}</h3>
+                            <p style="color:var(--secondary-color); font-weight:600; margin-bottom:0.5rem;">
+                                <i class="fas fa-calendar"></i> ${e.date || 'Date TBD'}
+                            </p>
+                            <p style="margin-bottom:0.5rem;"><i class="fas fa-map-marker-alt"></i> ${e.location || 'Location TBD'}</p>
+                            
+                            <div id="event-desc-${e.id}" style="max-height: 3rem; overflow: hidden; margin-bottom: 0.5rem;">
+                                <p>${e.description || 'No description available.'}</p>
+                            </div>
+                            <button class="btn btn-sm btn-outline" style="margin-bottom: 1rem; align-self: flex-start;" onclick="toggleExpand(this, 'event-desc-${e.id}')">Read More</button>
+
+                            ${isRegistered ?
+                        `<button class="btn btn-primary" style="width:100%; margin-top:auto; background: #22c55e; cursor: default;">Registered <i class="fas fa-check"></i></button>` :
+                        `<button class="btn btn-outline" style="width:100%; margin-top:auto;" onclick="openRegisterModal('${safeParam(e.title)}', '${e.id}')">Register</button>`
+                    }
+                        </div>
+                    `;
+            } catch (err) {
+                console.error("Error rendering event item:", e, err);
+                return '';
+            }
+        }).join('')}
+            </div>
+        `;
+    } catch (error) {
+        console.error("Error in renderEvents:", error);
+        contentArea.innerHTML = `<p class="text-center" style="color:red;">Error loading events: ${error.message}</p>`;
+    }
 }
 
-// Helper for Chat
-// window.openChat is now defined above with full logic
-
 function renderLostFound() {
-    contentArea.innerHTML = `
-        <div class="dashboard-grid">
-            ${lostFound.map(item => `
-                <div class="glass-panel card">
-                    <div style="display:flex; justify-content:space-between;">
-                        <h3 class="card-title">${item.item}</h3>
-                        <span class="badge" style="background:${item.type === 'Lost' ? '#ef4444' : '#22c55e'}; color:white;">${item.type}</span>
-                    </div>
-                    ${item.image ? `<img src="${item.image}" style="width:100%; height:150px; object-fit:cover; border-radius:8px; margin-top:1rem;">` : ''}
-                    <p style="margin-top:1rem;"><strong>Location:</strong> ${item.location}</p>
-                    <p><strong>Owner:</strong> ${item.owner}</p>
-                    ${item.ownerId === currentUser.uid ?
-            `<button class="btn btn-outline" style="width:100%; margin-top:1rem;" onclick="viewInquiries('${item.id}')">View Inquiries</button>` :
-            `<button class="btn btn-primary" style="width:100%; margin-top:1rem;" onclick="openChat('${item.owner}', '${item.ownerId}', '${item.id}')">Contact Owner</button>`
+    console.log("Rendering Lost & Found...", lostFound);
+    if (!currentUser) {
+        contentArea.innerHTML = '<p class="text-center">Please log in to view Lost & Found items.</p>';
+        return;
+    }
+
+    try {
+        if (!lostFound) {
+            contentArea.innerHTML = '<p class="text-center">Loading items...</p>';
+            return;
         }
+
+        if (lostFound.length === 0) {
+            contentArea.innerHTML = `
+                <div class="glass-panel" style="padding: 3rem; text-align: center;">
+                    <i class="fas fa-search" style="font-size: 3rem; color: var(--text-muted); margin-bottom: 1rem;"></i>
+                    <p style="color: var(--text-muted);">No lost or found items reported.</p>
+                    <button class="btn btn-primary" onclick="document.getElementById('newPostBtn').click()">Report Item</button>
                 </div>
-            `).join('')}
-        </div>
-    `;
+            `;
+            return;
+        }
+
+        contentArea.innerHTML = `
+            <div class="dashboard-grid">
+                ${lostFound.map(item => {
+            try {
+                return `
+                        <div class="glass-panel card">
+                            <div style="display:flex; justify-content:space-between;">
+                                <h3 class="card-title">${item.item || 'Unnamed Item'}</h3>
+                                <span class="badge" style="background:${item.type === 'Lost' ? '#ef4444' : '#22c55e'}; color:white;">${item.type || 'Unknown'}</span>
+                            </div>
+                            ${item.image ? `<img src="${item.image}" style="width:100%; height:150px; object-fit:cover; border-radius:8px; margin-top:1rem;">` : ''}
+                            <p style="margin-top:1rem;"><strong>Location:</strong> ${item.location || 'Unknown'}</p>
+                            <p><strong>Owner:</strong> ${item.owner || 'Unknown'}</p>
+                            
+                            <div style="display: flex; gap: 1rem; margin-top: 1rem; justify-content: flex-end;">
+                                ${item.ownerId !== currentUser.uid ? `
+                                    <button class="action-btn wishlist" onclick="toggleWishlist(this, '${item.id}')" title="Add to Wishlist">
+                                        <i class="far fa-heart"></i>
+                                    </button>
+                                    <button class="action-btn message" onclick="openChat('${safeParam(item.owner)}', '${item.ownerId}', '${item.id}')" title="Contact Owner">
+                                        <i class="fas fa-envelope"></i>
+                                    </button>
+                                ` : `
+                                    <button class="btn btn-outline btn-sm" onclick="viewInquiries('${item.id}')">View Inquiries</button>
+                                `}
+                            </div>
+                        </div>
+                    `;
+            } catch (err) {
+                console.error("Error rendering item:", item, err);
+                return '';
+            }
+        }).join('')}
+            </div>
+        `;
+    } catch (error) {
+        console.error("Error in renderLostFound:", error);
+        contentArea.innerHTML = `<p class="text-center" style="color:red;">Error loading content: ${error.message}</p>`;
+    }
 }
 
 // Helper for Download
@@ -927,5 +1300,161 @@ function renderMaterials() {
     `;
 }
 
-// Initial Render
-// Initial render handled by Auth State
+function renderEditProfile() {
+    pageTitle.textContent = 'Edit Profile';
+
+    const avatarContent = currentUser.photo ?
+        `<img src="${currentUser.photo}" style="width:100%; height:100%; object-fit:cover;">` :
+        `<span style="font-size: 2.5rem; color: white; font-weight: bold;">${getInitials(currentUser.name)}</span>`;
+
+    contentArea.innerHTML = `
+        <div class="glass-panel" style="max-width: 600px; margin: 0 auto; padding: 2rem;">
+            <form id="inlineEditProfileForm">
+                <div class="form-group" style="text-align: center; margin-bottom: 2rem;">
+                    <div id="inlineProfilePreview"
+                        style="width: 100px; height: 100px; border-radius: 50%; background: var(--primary-gradient); margin: 0 auto 1rem; display: flex; align-items: center; justify-content: center; overflow: hidden;">
+                        ${avatarContent}
+                    </div>
+                    <label for="inlineProfilePhotoInput" class="btn btn-outline btn-sm" style="cursor: pointer;">Change Photo</label>
+                    <input type="file" id="inlineProfilePhotoInput" accept="image/*" style="display: none;">
+                </div>
+                <div class="form-group">
+                    <label>Full Name</label>
+                    <input type="text" id="inlineEditName" class="form-control" value="${currentUser.name}" required>
+                </div>
+                <div class="form-group">
+                    <label>Student ID</label>
+                    <input type="text" id="inlineEditStudentId" class="form-control" value="${currentUser.id}" required>
+                </div>
+                <div class="form-group">
+                    <label>Department</label>
+                    <input type="text" id="inlineEditDepartment" class="form-control" value="${currentUser.department}" required>
+                </div>
+                <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 2rem;">
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+
+            <div style="margin-top: 3rem;">
+                <h3 style="margin-bottom: 1.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.5rem;">My Posts</h3>
+                <div id="myPostsList" style="display: flex; flex-direction: column; gap: 1rem;">
+                    <p style="text-align: center; color: var(--text-muted);">Loading posts...</p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    // Add event listeners for the new inline form
+    const inlineForm = document.getElementById('inlineEditProfileForm');
+    const inlinePhotoInput = document.getElementById('inlineProfilePhotoInput');
+    const inlinePreview = document.getElementById('inlineProfilePreview');
+
+    inlinePhotoInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            const imageUrl = URL.createObjectURL(file);
+            inlinePreview.innerHTML = `<img src="${imageUrl}" style="width:100%; height:100%; object-fit:cover;">`;
+        }
+    });
+
+    inlineForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const newName = document.getElementById('inlineEditName').value;
+        const newId = document.getElementById('inlineEditStudentId').value;
+        const newDept = document.getElementById('inlineEditDepartment').value;
+        const file = inlinePhotoInput.files[0];
+
+        try {
+            let photoUrl = currentUser.photo;
+            if (file) {
+                const storageRef = ref(storage, `profile_photos/${currentUser.uid}/${file.name}`);
+                await uploadBytes(storageRef, file);
+                photoUrl = await getDownloadURL(storageRef);
+            }
+
+            const updatedData = {
+                ...currentUser,
+                name: newName,
+                id: newId,
+                department: newDept,
+                photo: photoUrl
+            };
+
+            await setDoc(doc(db, "users", currentUser.uid), updatedData);
+            currentUser = updatedData;
+
+            updateHeaderProfile();
+            showToast("Profile updated successfully!", "success");
+        } catch (error) {
+            console.error("Error updating profile:", error);
+            showToast("Error updating profile", "error");
+        }
+    });
+
+    loadUserPosts();
+}
+
+async function loadUserPosts() {
+    const list = document.getElementById('myPostsList');
+    if (!list) return;
+
+    try {
+        const collections = ['notices', 'events', 'lostFound', 'materials'];
+        let allPosts = [];
+
+        for (const col of collections) {
+            const q = query(collection(db, col), where("authorId", "==", currentUser.uid));
+            const snapshot = await getDocs(q);
+            snapshot.forEach(doc => {
+                allPosts.push({
+                    id: doc.id,
+                    type: col,
+                    ...doc.data()
+                });
+            });
+        }
+
+        // Sort by date desc
+        allPosts.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+        if (allPosts.length === 0) {
+            list.innerHTML = '<p style="text-align: center; color: var(--text-muted);">No posts found.</p>';
+            return;
+        }
+
+        list.innerHTML = allPosts.map(post => `
+            <div class="card" style="padding: 1rem; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);">
+                <div style="display: flex; justify-content: space-between; align-items: start;">
+                    <div>
+                        <span class="badge badge-${post.type === 'lostFound' ? 'warning' : 'primary'}" style="margin-bottom: 0.5rem; display: inline-block; text-transform: capitalize;">
+                            ${post.type === 'lostFound' ? (post.typeStatus || 'Lost/Found') : post.type}
+                        </span>
+                        <h4 style="margin-bottom: 0.5rem; font-size: 1.1rem;">${post.title}</h4>
+                        <p style="font-size: 0.9rem; margin-bottom: 0.5rem; color: var(--text-muted);">${post.date}</p>
+                    </div>
+                    <button class="btn btn-danger btn-sm" onclick="deleteUserPost('${post.type}', '${post.id}')">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        `).join('');
+
+    } catch (error) {
+        console.error("Error loading posts:", error);
+        list.innerHTML = '<p style="text-align: center; color: var(--danger-color);">Error loading posts.</p>';
+    }
+}
+
+window.deleteUserPost = async (collectionName, docId) => {
+    if (!confirm("Are you sure you want to delete this post?")) return;
+
+    try {
+        await deleteDoc(doc(db, collectionName, docId));
+        showToast("Post deleted successfully", "success");
+        loadUserPosts(); // Reload list
+    } catch (error) {
+        console.error("Error deleting post:", error);
+        showToast("Error deleting post", "error");
+    }
+};
